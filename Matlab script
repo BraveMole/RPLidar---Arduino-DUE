@@ -1,0 +1,46 @@
+close all
+clear all
+clc
+
+% Open and configure serial port
+delete(instrfind({'port'},{'COM12'}));
+s = serial('COM12', 'BaudRate', 115200);
+fopen(s);
+
+distance = [];
+angle = [];
+distancetrie = [];
+angletrie = [];
+donnee=0.0;
+while (donnee~=300.0)
+    donnee=fscanf(s, '%f')
+end
+donneeutile =fscanf(s, '%i')
+for i=1:donneeutile
+    angle=[angle fscanf(s, '%f')];
+    distance=[distance fscanf(s, '%f')];
+end
+while (donnee~=400.0)
+    donnee=fscanf(s, '%f')
+end
+donneeutile =fscanf(s, '%i')
+for i=1:donneeutile
+    angletrie=[angletrie fscanf(s, '%f')];
+    distancetrie=[distancetrie fscanf(s, '%f')];
+end
+figure;
+plot(angle,distance,'.');
+figure;
+plot(angletrie,distancetrie,'.');
+axis square
+hold on;
+figure;
+x = distancetrie .* cosd(angletrie);
+y = -distancetrie .* sind(angletrie);
+plot(x,y,'.')
+axis square
+figure
+plot(x,y);
+axis square
+fclose(s);
+delete(s);

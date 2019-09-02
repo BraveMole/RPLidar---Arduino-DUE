@@ -1,0 +1,430 @@
+//Souchu Bastien for IMT Atlantique, 2019. Recover the raw data on the Serial port from a RPLidar A2 using an Arduino DUE, then send it trough a CAN bus. As the given driver for the RPLidar 
+//does not work on Arduino Due, the communication protocol is roughtly coded into this skectch. Every info regarding the communication protoctol can be found inside the c code
+//of the RPLidar driver. (found at https://github.com/robopeak/rplidar_arduino
+// A can frame is composed mean-angle on 16bits; mean-dist on 16 bits;approximated-width on 16bits;an indice on 16-bits(probably useless)
+
+#define pwm 3 
+#define nbPoints 400 
+#define maxtour 10
+#define distanceLimite 2000 //We limit object detection to two meters
+#define maxobjet 5 //We limit the number of detected object to 
+#define mindistanceintraobjet 200
+#include <due_can.h>
+
+
+CAN_FRAME obj0;CAN_FRAME obj1;CAN_FRAME obj2;CAN_FRAME obj3;CAN_FRAME obj4;CAN_FRAME obj255;
+
+short DistancesObjets[maxobjet];short AnglesObjets[maxobjet];short LargeurObjets[maxobjet];
+unsigned int lecture[5];long timer;long timeout = 500;bool Comm = false;bool measurementbonne=false;int nbmeasurement;
+float angle[nbPoints];float distance[nbPoints];float distancemeasurement[100][maxtour];
+float anglemeasurement[100][maxtour];int nbtour;int nbmeasurementpartour[maxtour];
+int pointaccepte;float distcurrent;float anglecurrent;
+int nbobjet=0;int nbloop=0;bool modeobjet = true;
+
+
+void setup() { 
+  Serial1.begin(115200);
+  analogWrite(pwm,255);//Starting the rotation of the RPLIDAR
+  pinMode(13,OUTPUT);//A led is plugged on the 13th pin for debugging purpose 
+  digitalWrite(13,1);
+  delay(2000);
+  digitalWrite(13,0);
+  Can0.begin(CAN_BPS_500K);
+  setupFrame();//Setting up the frame for the communication using CAN
+  nbmeasurement=0;
+}
+
+void setupFrame(){
+  obj0.id = 90;
+  obj0.length = 8;
+  obj1.id = 100;
+  obj1.length = 8;
+  obj2.id = 110;
+  obj2.length = 8;
+  obj3.id = 120;
+  obj3.length = 8;
+  obj4.id = 130;
+  obj4.length = 8;
+}
+
+void envoiFrame(int indiceobj){
+  switch(indiceobj){
+    case 0:
+      Can0.sendFrame(obj0);
+   break;
+    case 1:  
+      Can0.sendFrame(obj1);
+   break;
+   case 2:
+      Can0.sendFrame(obj2);
+   break;
+   case 3:
+      Can0.sendFrame(obj3);
+   break; 
+   case 4:
+      Can0.sendFrame(obj4);
+   break;
+  }
+  
+}
+
+void lancerScan(){
+  bool syncbyte1recu=false;  
+  bool syncbyte2recu=false;
+  int indice=0;int currentbyte;
+  timer=millis();
+  Serial1.write(165); // In order to chech the RPLidar's state, you need to the syncbyte (165)
+  Serial1.write(80); //  Then send a command byte, here 8O (info status command)
+  while(millis()-timer<500 && indice<5){ 
+    while((!Serial1.available()) && (millis()-timer<500)){ // We give 500 ms to the RPLidar to answer while waiting for a response
+      
+    }
+    currentbyte=Serial1.read();
+    if (!syncbyte1recu){
+      syncbyte1recu = (currentbyte==165); //If the first byte is a syncbyte, we check first condition
+    }
+    else if(!syncbyte2recu){ //A correct response by the RPLidar starts with two syncbytes : 165 then 90
+      syncbyte2recu = (currentbyte==90);
+      syncbyte1recu = syncbyte2recu;
+    }
+    else { //If we received two syncbytes, we consider the message a legit and start to record it
+      lecture[indice]=currentbyte;
+      indice++;
+    }
+  }
+  if (indice==5 && lecture[4]==4){ //A correct answer to a checkstate command must be of length 5 and end with a 4
+    indice =0;syncbyte1recu=false;syncbyte2recu=false;timer=millis();
+    Serial1.write(165);
+    Serial1.write(37); //Stop command : the RPlidar stops all operation
+    Serial1.write(165);
+    Serial1.write(32); // Startscan command: the RPLidar will start its measurement operations
+    while((millis()-timer<500) && (indice<5)){
+      while (!Serial1.available() && (millis()-timer<500)){
+        
+      }
+      currentbyte=Serial1.read();
+      if (!syncbyte1recu){
+      syncbyte1recu = (currentbyte==165);
+       }
+      else if(!syncbyte2recu){
+      syncbyte2recu = (currentbyte==90);
+      syncbyte1recu = syncbyte2recu;
+      }
+      else {
+      lecture[indice]=currentbyte;
+      indice++;
+      }
+     }
+     if (indice ==5&& lecture[4]==129){ //A correct response for a launchscan command starts with two syncbyte, then a message of length five that ends with 129
+      Comm=true; 
+      analogWrite(pwm,255); //If we received the correct answer, we are sure that we etablished communication with the device and that we will receive measurements on the Serial
+     }
+  }
+}
+
+bool verificationSyncmeasurement(int currentb){ 
+  int newb = currentb>>1; 
+  return ((newb ^currentb)%2==1); //Condition for a correct measurement communication
+}
+
+void LecturePoint(){
+  measurementbonne = false;
+  int indice =0;bool syncbyte1recu=false;bool syncbyte2recu=false;long timer=millis();
+  int currentbyte;
+  while((millis()-timer<600) && (indice<4)){
+     while (!Serial1.available() && (millis()-timer<600)){
+        
+     }
+    currentbyte=Serial1.read();
+    if (!syncbyte1recu){
+      syncbyte1recu = verificationSyncmeasurement(currentbyte); //The first byte of a measurement must follows this rule
+    }
+    else if(!syncbyte2recu){ //The second byte of a measurement communication must be an odd number
+      syncbyte2recu= (currentbyte%2==1);
+      syncbyte1recu = syncbyte2recu;
+      if (syncbyte2recu){
+        lecture[0]=currentbyte;
+        indice++;
+      }
+      else{
+        indice=0;
+      }
+    }
+    else{
+      lecture[indice]=currentbyte;
+      indice++;
+    }
+  }
+  if (indice==4){
+    distcurrent = combine(lecture[2],lecture[3])/4.0;//The distance is coded on the 3dr and 4th byte, with a gain of 4
+    anglecurrent = (combine(lecture[0],lecture[1])>>1)/64.0; //The angle is coded beetween the 2nd and 16th bit, with a gain of 64
+    measurementbonne = true;
+  }
+  else{
+    Comm = false; //If we fail to receive a correct measurement communication, we stop the rotation of the RPLidar and check its state
+    analogWrite(pwm,0);
+  }
+}
+
+void swap(float* a,float* b){
+  float t = *a;
+  *a=*b;
+  *b=t;
+}
+
+void triinsertion(){//Insertion sort, optimal as the original set is almost sorted
+  for (int i=0;i<nbtour+1;i++){
+    for (int j=1;j<nbmeasurementpartour[i];j++){
+      for (int k=j-1;k>=0;k--){
+        if (anglemeasurement[k+1][i]<anglemeasurement[k][i]){
+          swap(&anglemeasurement[k+1][i],&anglemeasurement[k][i]);
+          swap(&distancemeasurement[k+1][i],&distancemeasurement[k][i]);
+        }
+        else{
+          k=-1;
+        }
+      }
+    }
+  }
+}
+
+unsigned int combine(unsigned int lowbit,unsigned int highbit){ // Combine two bytes into a 16length unsigned int
+  return (highbit *256 + lowbit); 
+}
+
+void measurement(){//Measurement loop
+  int j=0;nbtour=0;bool tourfini =false;float angle;
+  pointaccepte=0;
+  for (int i=0;i<maxtour;i++){//Reseting the counter
+    nbmeasurementpartour[i]=0;
+  }
+  for (int i=0;i<nbPoints;i++){
+   if (!Comm) { //We wait for the RPLidar to be the correct state
+    lancerScan();
+    i--;
+  }
+  else{
+    LecturePoint(); //Storing angle and distance for that measurement
+    if (measurementbonne){ //We check if we received a correct response
+      anglemeasurement[j][nbtour]=anglecurrent;
+      if (anglemeasurement[j][nbtour]>=270.0){ //We consider angle from -90° to 90°. So if the angle > 270 we consider it as negative
+        if(tourfini){ // If that's the first time we find a negative angle for this rotation, we store it into a new sorted set of angle
+          angle = anglemeasurement[j][nbtour];// By doing that, we obtain multiple sorted lists with bounds of -90°/90° 
+          nbtour++;tourfini=false;
+          j=0;
+          anglemeasurement[j][nbtour]=angle-360.0;
+        }
+        else{
+        anglemeasurement[j][nbtour]-=360.0; 
+        }
+      }
+      if (anglemeasurement[j][nbtour]<=90){ //We look at the last angle stored. If it's beetween -90°/90°, we accept it and store the corresponding distance
+        pointaccepte++;
+        nbmeasurementpartour[nbtour]++;
+        distancemeasurement[j][nbtour] = distcurrent;
+        j++;
+      }
+      else if(j>1){//If the angle is not between these bounds, we wait for a more interesting measurement
+        tourfini=true;//if true, the previous set of sorted angle is done, we need to start a new one
+      }
+    }
+  }
+  }
+}
+
+void trifusion(){ //We got multiple sorted list ranging from -90° to 90°, we will merge them to a single sorted list. Optimal
+  float mini;
+  int indices[maxtour] = {0,0,0,0};int tourchoisi;
+  for (int i =0;i<pointaccepte;i++){
+    mini=400;
+    for (int j=0;j<nbtour+1;j++){  
+      if (indices[j]<nbmeasurementpartour[j]){
+        if (anglemeasurement[indices[j]][j]<mini){
+          mini = anglemeasurement[indices[j]][j];
+          tourchoisi=j;
+        }
+      }
+    }
+    angle[i]=mini;
+    distance[i]=distancemeasurement[indices[tourchoisi]][tourchoisi];
+    indices[tourchoisi]++; 
+  }
+}
+
+void detectionobjet(){ // Given a list of distance sorted by there corresponding angle, will detect the start and end point of each object
+  int debutobjet;int finobjet;nbobjet=0;int i=0;bool objet=false;
+  while (i<pointaccepte-1){
+    if (distance[i]<distanceLimite){ //We don't consider measurement too far away
+      if (!objet){ //if false, that measurement is the start of a new detected object
+        objet = true; debutobjet=i;
+      }
+      else if (objet && abs(distance[i]-distance[i-1])>mindistanceintraobjet){ //If the values of two successive points are too different, we consider there are two different object 
+        finobjet=i-1; 
+        if (finobjet-debutobjet>1){
+           creationobjet(debutobjet,finobjet);
+        } 
+        debutobjet=i;
+      }
+      // If none of those if-conditions are true, it means we are still in the middle of an object
+    }
+    else{
+      if (objet){ //If their is nothing at that point but we found an object prior to that, it means that the it's the limit of that object
+        objet=false;finobjet=i-1;
+        if (finobjet-debutobjet>1){
+           creationobjet(debutobjet,finobjet); //We process the information to calculate the mean distance, mean angle, etc...., of that object
+           if (nbobjet==maxobjet){//We can't store more than maxobject
+            i=pointaccepte;
+           }
+        }
+      }
+    }
+    i++;
+  }
+  
+}
+
+void creationobjet(int debutobjet,int finobjet){ //Given the start and end of the object, construct the mean distance, width, mean angle of that object and store it into an array
+  float distmax = 0;float distmin= 5000;short anglemoyen;float calcangle;float calcdist;short dist;float larg;
+  //short variableutilelargeur;
+  for (int i=debutobjet;i<finobjet;i++){
+    if(distance[i]>distmax){
+      distmax=distance[i];
+    }
+    if(distance[i]<distmin){
+      distmin=distance[i];
+    }
+  }
+  calcdist = (distmax+distmin)/2;
+  dist = (short)(calcdist);
+  calcangle = (angle[debutobjet]+angle[finobjet])/2;
+  anglemoyen=(short)(calcangle*10); 
+  DistancesObjets[nbobjet]=dist;
+  AnglesObjets[nbobjet]=anglemoyen;
+  larg = (angle[finobjet]-angle[debutobjet])*(PI/180);
+  larg = cos(larg)*2*distance[debutobjet]*distance[finobjet];
+  larg = distance[debutobjet]*distance[debutobjet]+distance[finobjet]*distance[finobjet]-larg;
+  larg=sqrt(larg) ;
+  anglemoyen=(short)(larg);
+  LargeurObjets[nbobjet]=anglemoyen;
+  nbobjet++;
+}
+
+void filtre(){//given a raw set of distance, sorted by angle, returns a filtered list with less measurement artifacts
+  for (int i=0;i<pointaccepte;i++){
+    if (distance[i]==0 || distance[i]>distanceLimite){ //By default, when the RPLidar doesn't see anything it returns 0. It's more convenient to transform those into just above the sight limit
+      distance[i]=distanceLimite+1;
+    }
+  }
+  for (int i =0;i<pointaccepte-4;i++){//We "fill the gaps". Sometimes the RPLidar doesn't see anything for one point, that operation is necessary to get detections consistent with the reality
+    if ((distance[i]<distanceLimite) && (distance[i+1]>distanceLimite) && (abs(distance[i+2]-distance[i])<40)){
+      distance[i+1]=(distance[i]+distance[i+2])/2;
+    }
+    if ((distance[i]<distanceLimite) && (distance[i+1]>distanceLimite) && (distance[i+2]>distanceLimite) && (abs(distance[i+3]-distance[i])<60)){
+      distance[i+1]=(distance[i]+distance[i+3])/2;
+      distance[i+2]=(distance[i]+distance[i+3])/2;
+    }
+    if ((distance[i]<distanceLimite) && (distance[i+1]>distanceLimite) && (distance[i+3]>distanceLimite) && (distance[i+2]>distanceLimite) && (abs(distance[i+4]-distance[i])<80)){
+      distance[i+1]=(distance[i]+distance[i+4])/2;
+      distance[i+2]=(distance[i]+distance[i+4])/2;
+      distance[i+3]=(distance[i]+distance[i+4])/2;
+    }
+  }
+  for (int i=0;i<pointaccepte-3;i++){ //If we have lonely points, we consider them artifacts and ignore the object
+    if ((distance[i]>distanceLimite) && (distance [i+1]<distanceLimite) && (distance[i+2]>distanceLimite)){
+      distance[i+1] = distanceLimite+1; 
+    }
+    if ((distance[i]>distanceLimite) && (distance [i+1]<distanceLimite) && (distance[i+2]<distanceLimite)&&(distance[i+3]>distanceLimite)){
+      distance[i+1] = distanceLimite+1; 
+      distance[i+2]= distanceLimite+1;
+    }
+  }
+}
+
+void resetFrame(int indiceobj){
+  switch(indiceobj){
+    case 0:
+      obj0.data.value=0;
+   break;
+    case 1:
+      obj1.data.value=0;
+   break;
+   case 2:
+      obj2.data.value=0;
+   break;
+   case 3:
+      obj3.data.value=0;
+   break;
+   case 4:
+      obj4.data.value=0;
+   break;
+}
+}
+
+void setFrame(int indiceobj){//Preparing the frame for the CAN communication
+  switch(indiceobj){
+    case 0:
+      obj0.data.s0 = AnglesObjets[indiceobj];
+      obj0.data.s1 = DistancesObjets[indiceobj];
+      obj0.data.s2 = LargeurObjets[indiceobj];
+      obj0.data.s3 = indiceobj ;
+   break;
+    case 1:
+      obj1.data.s0 = AnglesObjets[indiceobj];
+      obj1.data.s1 = DistancesObjets[indiceobj];
+      obj1.data.s2 = LargeurObjets[indiceobj];
+      obj1.data.s3 = indiceobj;
+   break;
+   case 2:
+      obj2.data.s0 = AnglesObjets[indiceobj];
+      obj2.data.s1 = DistancesObjets[indiceobj];
+      obj2.data.s2 = LargeurObjets[indiceobj];
+      obj2.data.s3 = indiceobj;
+   break;
+   case 3:
+      obj3.data.s0 = AnglesObjets[indiceobj];
+      obj3.data.s1 = DistancesObjets[indiceobj];
+      obj3.data.s2 = LargeurObjets[indiceobj];
+      obj3.data.s3 = indiceobj;
+   break;
+   case 4:
+      obj4.data.s0 = AnglesObjets[indiceobj];
+      obj4.data.s1 = DistancesObjets[indiceobj];
+      obj4.data.s2 = LargeurObjets[indiceobj];
+      obj4.data.s3 = indiceobj;
+   break;
+}
+}
+
+void envoiObjets(){
+  for (int i=0;i<maxobjet;i++){
+    resetFrame(i);
+  }
+  for (int i=0;i<nbobjet;i++){
+    setFrame(i);
+  }
+  for (int i=0;i<maxobjet;i++){
+      envoiFrame(i);
+  }
+}
+
+void loop() {
+  timer = millis();
+  measurement();
+  triinsertion();//Thanks to the measurement loop, we get multiple ALMOST-sorted-by-angle list of angle and distance.
+                 //The RPLidar raw angle output is not totally sorted, so we fix it by an insertion sort
+  trifusion();//Merging all sets
+  filtre();//Filtering to reduce measurement artifacts
+  detectionobjet();//Detecting and storing the object
+  envoiObjets();//Sending them on the CAN bus
+  if(millis()-timer>200){//We have 200 ms to do all of that, we light the led if we ran out of time for debugging purpose
+    digitalWrite(13,1);
+  }
+  else  {
+    digitalWrite(13,0);
+  }
+  while(millis()-timer<200){//We are doing a main loop every 200ms
+    
+  }
+  
+  
+}

@@ -1,0 +1,340 @@
+#define pwm 3
+#define nbPoints 400
+#define maxtour 10
+#define distanceLimite 2000
+#define maxobjet 20
+#define mindistanceintraobjet 200
+#include <due_can.h>
+
+
+
+short DistancesObjets[maxobjet];short AnglesObjets[maxobjet];short LargeurObjets[maxobjet];
+unsigned int lecture[5];long timer;long timeout = 500;bool Comm = false;bool mesurebonne=false;int nbmesure;
+float angle[nbPoints];float distance[nbPoints];float distancemesure[100][maxtour];
+float anglemesure[100][maxtour];int nbtour;int nbmesurepartour[maxtour];
+int pointaccepte;float distcurrent;float anglecurrent;
+int nbobjet=0;int nbloop=0;bool modeobjet = true;
+
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200);
+  analogWrite(pwm,255);
+  delay(2000);
+  nbmesure=0;
+}
+
+void lancerScan(){
+  bool syncbyte1recu=false;  
+  bool syncbyte2recu=false;
+  int indice=0;int currentbyte;
+  timer=millis();
+  Serial1.write(165); // 165 est le bit de syncro
+  Serial1.write(80); // 80 est l'id de commande de demande d'info
+  while(millis()-timer<500 && indice<5){ // On donne 0.5 secondes à la carte pour répondre
+    while((!Serial1.available()) && (millis()-timer<500)){ // On attend que le Serial soit disponible pour lire la donnée
+      
+    }
+    currentbyte=Serial1.read();
+    if (!syncbyte1recu){
+      syncbyte1recu = (currentbyte==165);
+    }
+    else if(!syncbyte2recu){ // On regarde si les deux premiers bits sont les deux bits de syncro (165 puis 90). Sinon, on recommence à écouter
+      syncbyte2recu = (currentbyte==90);
+      syncbyte1recu = syncbyte2recu;
+    }
+    else { //Si on a bien reçu les deux bits de syncro, alors on stocke les 5 prochaines valeurs reçues sur le serial
+      lecture[indice]=currentbyte;
+      indice++;
+    }
+  }
+  if (indice==5 && lecture[4]==4){ // Si on a bien  reçu 5 éléments, et que le 5ème est 4 (code de reponse signifiant que le rplidar est fonctionnel), on lance le scan
+    indice =0;syncbyte1recu=false;syncbyte2recu=false;timer=millis();
+    Serial1.write(165);
+    Serial1.write(37); //Code demandant au RPlidar d'arrêter toute opération
+    Serial1.write(165);
+    Serial1.write(32); // Code demandant au RPlidar de commencer à scanner
+    while((millis()-timer<500) && (indice<5)){
+      while (!Serial1.available() && (millis()-timer<500)){
+        
+      }
+      currentbyte=Serial1.read();
+      if (!syncbyte1recu){
+      syncbyte1recu = (currentbyte==165);
+       }
+      else if(!syncbyte2recu){
+      syncbyte2recu = (currentbyte==90);
+      syncbyte1recu = syncbyte2recu;
+      }
+      else {
+      lecture[indice]=currentbyte;
+      indice++;
+      }
+     }
+     if (indice ==5&& lecture[4]==129){ //Si l'on reçoit 129 au dernier bit, c'est que le RPLidar commence à scanner, la communication est donc établie
+      Comm=true; 
+      analogWrite(pwm,255);
+      Serial.println("Comm effectuée");
+     }
+  }
+}
+
+bool verificationSyncMesure(int currentb){ 
+  int newb = currentb>>1; //Protocole pour vérifer si le bit reçu est correct (byte de syncro)
+  return ((newb ^currentb)%2==1);
+}
+
+void LecturePoint(){
+  mesurebonne = false;
+  int indice =0;bool syncbyte1recu=false;bool syncbyte2recu=false;long timer=millis();
+  int currentbyte;
+  while((millis()-timer<600) && (indice<4)){
+     while (!Serial1.available() && (millis()-timer<600)){
+        
+     }
+    currentbyte=Serial1.read();
+    if (!syncbyte1recu){
+      syncbyte1recu = verificationSyncMesure(currentbyte); //On verifie que le premier byte reçu obeit à une règle
+    }
+    else if(!syncbyte2recu){ //Si oui, alors on regarde si le deuxième byte est bien impair
+      syncbyte2recu= (currentbyte%2==1);
+      syncbyte1recu = syncbyte2recu;
+      if (syncbyte2recu){
+        lecture[0]=currentbyte;
+        indice++;
+      }
+      else{
+        indice=0;
+      }
+    }
+    else{
+      lecture[indice]=currentbyte;
+      indice++;
+    }
+  }
+  if (indice==4){
+    distcurrent = combine(lecture[2],lecture[3])/4.0;
+    anglecurrent = (combine(lecture[0],lecture[1])>>1)/64.0; //Le premier byte est un byte de syncro, inutile. Les 15 prochains bits contiennent l'angle, puis un bit de syncro, et enfin deux byte de distance
+    mesurebonne = true; //Le reste des bytes ne nous intéresse pas
+  }
+  else{
+    Comm = false;
+    analogWrite(pwm,0);
+  }
+}
+
+void affichage(float signal){
+  Serial.println(signal);
+  for (int i=0;i<nbtour+1;i++){
+   Serial.println("----");
+   for(int j=0; j< nbmesurepartour[i];j++){
+    Serial.println(anglemesure[j][i]);
+   }
+  }
+}
+
+void swap(float* a,float* b){
+  float t = *a;
+  *a=*b;
+  *b=t;
+}
+
+void triinsertion(){// On dispose de plusieurs listes quasi triées, cette fonction les transforme en plusieurs listes totalement triées
+  for (int i=0;i<nbtour+1;i++){
+    for (int j=1;j<nbmesurepartour[i];j++){
+      for (int k=j-1;k>=0;k--){
+        if (anglemesure[k+1][i]<anglemesure[k][i]){
+          swap(&anglemesure[k+1][i],&anglemesure[k][i]);
+          swap(&distancemesure[k+1][i],&distancemesure[k][i]);
+        }
+        else{
+          k=-1;
+        }
+      }
+    }
+  }
+}
+
+unsigned int combine(unsigned int lowbit,unsigned int highbit){
+  return (highbit *256 + lowbit); //On transforme deux u8 en un u16
+}
+
+void mesure(){
+  int j=0;nbtour=0;bool tourfini =false;float angle;
+  pointaccepte=0;
+  for (int i=0;i<maxtour;i++){
+    nbmesurepartour[i]=0;
+  }
+  for (int i=0;i<nbPoints;i++){
+   if (!Comm) { //Tant que la communication n'est pas établie, on boucle
+    lancerScan();
+    i--;
+  }
+  else{
+    LecturePoint(); //On obtient la dernière mesure d'angle et de distance
+    if (mesurebonne){
+      anglemesure[j][nbtour]=anglecurrent;
+      if (anglemesure[j][nbtour]>=270.0){ //Si l'angle est sup à 270, alors on le considère comme négatif
+        if(tourfini){ // Si c'est la première fois que l'on trouve un angle >270, alors c'est que l'on peut commencer une nouvelle liste d'angle
+          angle = anglemesure[j][nbtour];//Ainsi, on obtient plusieurs liste d'angle consécutif de -90 à +90 
+          nbtour++;tourfini=false;
+          j=0;
+          anglemesure[j][nbtour]=angle-360.0;
+        }
+        else{
+        anglemesure[j][nbtour]-=360.0; //Sinon, on continue la liste actuelle
+        }
+      }
+      if (anglemesure[j][nbtour]<=90){ // Si l'angle est compris entre -90 et +90, alors il nous interesse
+        pointaccepte++;
+        nbmesurepartour[nbtour]++;
+        distancemesure[j][nbtour] = distcurrent; //On stock donc la valeur
+        j++;
+      }
+      else if(j>1){//Sinon,on est dans la partie inutile (angle entre 91 ° et 269 °), on attend de revenir dans la partie qui nous intéresse
+        tourfini=true;
+      }
+    }
+  }
+  }
+}
+
+void trifusion(){ //On a plusieurs listes triées, on va les fusionner pour obtenir une unique liste triée
+  float mini;
+  int indices[maxtour] = {0,0,0,0};int tourchoisi;
+  for (int i =0;i<pointaccepte;i++){
+    mini=400;
+    for (int j=0;j<nbtour+1;j++){  
+      if (indices[j]<nbmesurepartour[j]){
+        if (anglemesure[indices[j]][j]<mini){
+          mini = anglemesure[indices[j]][j];
+          tourchoisi=j;
+        }
+      }
+    }
+    angle[i]=mini;
+    distance[i]=distancemesure[indices[tourchoisi]][tourchoisi];
+    indices[tourchoisi]++; 
+  }
+}
+
+void serialsend(float signal){
+  Serial.println(signal);
+  Serial.println(pointaccepte);
+ for (int i =0;i<pointaccepte;i++){
+//    Serial.print("Angle : ");
+   Serial.println(angle[i]);
+//    Serial.print("Distance : ");
+   Serial.println(distance[i]);
+  }
+}
+
+void detectionobjet(){
+  int debutobjet;int finobjet;nbobjet=0;int i=0;bool objet=false;
+  while (i<pointaccepte-1){ //On parcours tous les points
+    if (distance[i]<distanceLimite){ //Si la distance est <5000, cela veut dire qu'un objet est présent
+      if (!objet){ //Si c'est la première fois qu'on le détecte, alors on place un marqueur de début d'objet
+        objet = true; debutobjet=i;
+      }
+      else if (objet && abs(distance[i]-distance[i-1])>100){ //Si on avait déjà trouvé un objet mais que la différence de distance avec la dernière mesure est trop importante, 
+        finobjet=i-1; //C'est que l'on a trouvé un autre objet
+        if (finobjet-debutobjet>1){ //Si l'objet n'est présent qu'à une unique valeur, on l'ignore et on considère que c'est un artefact
+           creationobjet(debutobjet,finobjet);
+        }
+        debutobjet=i;
+      }
+    }
+    else{ //Il n'y a rien à cet angle
+      if (objet){ //Si l'on avait trouvé un objet, alors c'est la fin de cet objet
+        objet=false;finobjet=i-1;
+        if (finobjet-debutobjet>4){
+           creationobjet(debutobjet,finobjet);
+        }
+      }
+    }
+    i++;
+  }
+  
+}
+
+void creationobjet(int debutobjet,int finobjet){
+  float distmax = 0;float distmin= 5000;short anglemoyen;float calcangle;float calcdist;short dist;float larg;
+  //short variableutilelargeur;
+  for (int i=debutobjet;i<finobjet;i++){
+    if(distance[i]>distmax){
+      distmax=distance[i];
+    }
+    if(distance[i]<distmin){
+      distmin=distance[i];
+    }
+  }
+  calcdist = (distmax+distmin)/2;
+  dist = (short)(calcdist);
+  calcangle = (angle[debutobjet]+angle[finobjet])/2;
+  anglemoyen=(short)(calcangle);
+  DistancesObjets[nbobjet]=dist;
+  AnglesObjets[nbobjet]=anglemoyen;
+  larg = (calcangle-angle[debutobjet])*(PI/180);
+  larg = tan(larg);
+  larg = larg*calcdist;
+  if (larg<0){// car abs ne FONCTIONNE PAS SUR CETTE CARTE
+    larg=-larg;
+  }
+  anglemoyen=(short)(larg);
+  LargeurObjets[nbobjet]=anglemoyen;
+  nbobjet++;
+}
+
+void filtre(){
+  for (int i=0;i<pointaccepte;i++){
+    if (distance[i]==0 || distance[i]>distanceLimite){
+      distance[i]=distanceLimite+1;
+    }
+  }
+  for (int i =0;i<pointaccepte-4;i++){//On va "combler" les trous en 
+    if ((distance[i]<distanceLimite) && (distance[i+1]>distanceLimite) && (abs(distance[i+2]-distance[i])<40)){
+      distance[i+1]=(distance[i]+distance[i+2])/2;
+    }
+    if ((distance[i]<distanceLimite) && (distance[i+1]>distanceLimite) && (distance[i+2]>distanceLimite) && (abs(distance[i+3]-distance[i])<60)){
+      distance[i+1]=(distance[i]+distance[i+3])/2;
+      distance[i+2]=(distance[i]+distance[i+3])/2;
+    }
+    if ((distance[i]<distanceLimite) && (distance[i+1]>distanceLimite) && (distance[i+3]>distanceLimite) && (distance[i+2]>distanceLimite) && (abs(distance[i+4]-distance[i])<80)){
+      distance[i+1]=(distance[i]+distance[i+4])/2;
+      distance[i+2]=(distance[i]+distance[i+4])/2;
+      distance[i+3]=(distance[i]+distance[i+4])/2;
+    }
+  }
+  for (int i=0;i<pointaccepte-2;i++){ //On supprime les mesures non nulles isolées
+    if ((distance[i]>distanceLimite) && (distance [i+1]<distanceLimite) && (distance[i+2]>distanceLimite)){
+      distance[i+1] = distanceLimite+1; 
+    }
+  }
+}
+
+void affichageobjet(){
+  for (int i=0;i<nbobjet;i++){
+    Serial.print("Distance moyenne : ");
+    Serial.println(DistancesObjets[i]);
+    Serial.print("Angle moyen : ");
+    Serial.println(AnglesObjets[i]);
+    Serial.print("Largeur estimée : ");
+    Serial.println(LargeurObjets[i]);
+  }
+}
+
+
+void loop() {
+  mesure();
+  triinsertion();
+  trifusion();
+  timer = millis();
+  serialsend(300.0);
+  filtre();
+  serialsend(400.0);
+  detectionobjet();
+  affichageobjet();
+  delay(500);
+  
+  
+}
